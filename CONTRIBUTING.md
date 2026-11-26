@@ -78,10 +78,9 @@ internal/api/       chi HTTP handlers mirroring the CLI
 
 **Example: adding a new constructor argument type**
 
-1. Add a case to `Arg.ToScVal` in `internal/config/args.go`
-2. Add the type name to `SupportedArgTypes` in the same file
-3. Add a row to the table test in `internal/config/args_test.go`
-4. No other packages need to change — the new type works through the existing `Arg` plumbing
+1. Write an encoder and register it in `argTypeRegistry` in `internal/config/args.go`
+2. Add a row to the table test in `internal/config/args_test.go`
+3. No other packages need to change: `SupportedArgTypes` and every "supported: ..." error message are derived from the registry, and the new type works through the existing `Arg` plumbing
 
 Three interfaces are the seams the whole design rests on:
 
@@ -111,11 +110,52 @@ Two rules that keep this working:
 
 ### Adding a constructor argument type
 
-Everything is in one switch. Add a case to `Arg.ToScVal` in
-[`internal/config/args.go`](internal/config/args.go), add the name to
-`SupportedArgTypes`, and add a row to the table test in `args_test.go`. Nothing
-else needs to change — and note that `{type: xdr}` already means no type is ever
-a hard blocker for a user.
+Everything goes through one registry. Write an encoder, register it in
+`argTypeRegistry` in [`internal/config/args.go`](internal/config/args.go), and
+add a row to the table test in `args_test.go`. `SupportedArgTypes` is built
+from the registry, so the "supported: ..." messages pick the new name up by
+themselves. Nothing else needs to change, and `{type: xdr}` already means no
+type is ever a hard blocker for a user.
+
+**Example:** this is how `timepoint` is wired. A new type takes the same three
+edits.
+
+```go
+// internal/config/args.go
+
+const ArgTimepoint = "timepoint"
+
+func encodeTimepoint(a Arg) (xdr.ScVal, error) {
+	n, err := a.Value.asUint(64) // range-checks and reports the bad value
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	tp := xdr.TimePoint(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvTimepoint, Timepoint: &tp}, nil
+}
+
+// in init(), where the registry is filled:
+	{ArgTimepoint, encodeTimepoint},
+```
+
+```go
+// internal/config/args_test.go, in scalarArgCases
+"timepoint": {
+	yaml:     "{type: timepoint, value: 1700000000}",
+	wantType: xdr.ScValTypeScvTimepoint,
+	check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.TimePoint(1700000000), *v.Timepoint) },
+},
+```
+
+A config author can then write it in `soroforge.yaml`:
+
+```yaml
+constructor_args:
+  - {type: timepoint, value: 1700000000}
+```
+
+Run `go test ./internal/config/`. A test checks that every registered type has
+a table case, so a missing row fails there.
 
 ### Adding a Signer
 
