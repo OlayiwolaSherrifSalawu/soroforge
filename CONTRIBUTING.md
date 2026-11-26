@@ -161,8 +161,63 @@ a table case, so a missing row fails there.
 
 Implement `stellar.Signer` (`Address` and `Sign`). Hardware wallets, remote
 signing services, and multisig collection all fit behind it without any
-orchestration change. See the `TODO(extension)` note in
-[`internal/stellar/signer.go`](internal/stellar/signer.go).
+orchestration change. See the `TODO(extension)` note on the interface in
+[`internal/stellar/stellar.go`](internal/stellar/stellar.go), and the existing
+implementations: `KeypairSigner` (`signer.go`), `CommandSigner`
+(`command_signer.go`), `MultiSigner` (`multisig.go`) and `MockSigner`
+(`mock.go`).
+
+**Example:** a signer that asks a hardware security module to sign the
+transaction hash, so the key never leaves the device.
+
+```go
+package stellar
+
+import (
+	"encoding/base64"
+	"fmt"
+
+	"github.com/stellar/go-stellar-sdk/txnbuild"
+)
+
+// HSMSigner holds only the public address; the HSM holds the key.
+type HSMSigner struct {
+	address  string                               // G... public key, safe to expose
+	signHash func(hash [32]byte) ([]byte, error) // your HSM or KMS client call
+}
+
+var _ Signer = (*HSMSigner)(nil)
+
+func (s *HSMSigner) Address() string { return s.address }
+
+func (s *HSMSigner) Sign(networkPassphrase string, tx *txnbuild.Transaction) (*txnbuild.Transaction, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("sign: nil transaction")
+	}
+	hash, err := tx.Hash(networkPassphrase)
+	if err != nil {
+		return nil, fmt.Errorf("hash transaction: %w", err)
+	}
+	sig, err := s.signHash(hash)
+	if err != nil {
+		return nil, fmt.Errorf("sign transaction hash: %w", err) // never include key material
+	}
+	return tx.AddSignatureBase64(networkPassphrase, s.address, base64.StdEncoding.EncodeToString(sig))
+}
+```
+
+Construct it in `buildPrimarySigner` in
+[`cmd/soroforge/root.go`](cmd/soroforge/root.go), next to the keypair and
+command signers. Because the deploy flow only sees `stellar.Signer`, wrapping
+it in `NewMultiSigner` for co-signers works unchanged. Test it the way
+`signer_test.go` tests `KeypairSigner`: sign a transaction and check the
+signature against `Address()`.
+
+If the signing happens in another process, you may not need a new type at all:
+`CommandSigner` already runs an external signer set with
+`SOROFORGE_SIGNER_COMMAND`, using the stdin/stdout protocol described under
+"External signers" in the README. [`examples/signer`](examples/signer) is a
+minimal program that speaks it.
 
 If your implementation holds key material, follow the existing rules: keep it
 unexported, never log it, never serialise it, and never include it in an error
